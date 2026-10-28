@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0f172a">
+<title>TestShare</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<style>
+:root{--bg:#0f172a;--card:#1e293b;--muted:#94a3b8;--txt:#f1f5f9;--acc:#22c55e;--acc2:#3b82f6;--err:#ef4444}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+body{margin:0;font-family:system-ui,-apple-system,Roboto,sans-serif;background:var(--bg);color:var(--txt);padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom)}
+header{position:sticky;top:0;z-index:5;background:var(--bg);padding:14px 16px;border-bottom:1px solid #334155;display:flex;gap:10px;align-items:center}
+header h1{font-size:20px;margin:0;flex:1}
+input,textarea,select{width:100%;background:#0b1220;color:var(--txt);border:1px solid #334155;border-radius:10px;padding:12px;font-size:16px;font-family:inherit}
+textarea{resize:vertical;min-height:70px}
+button{border:0;border-radius:10px;padding:12px 16px;font-size:15px;font-weight:600;color:#fff;background:var(--acc2);cursor:pointer}
+button:disabled{opacity:.5}
+.btn-acc{background:var(--acc)}
+.btn-ghost{background:#334155}
+main{padding:12px 16px 90px;max-width:720px;margin:auto}
+.tools{display:flex;gap:8px;margin-bottom:12px}
+.tools select{width:auto}
+.card{background:var(--card);border-radius:14px;padding:14px;margin-bottom:12px}
+.card h3{margin:0 0 4px;font-size:17px;word-break:break-word}
+.meta{color:var(--muted);font-size:13px}
+.desc{margin:8px 0;font-size:14px;line-height:1.4;white-space:pre-wrap;word-break:break-word}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px}
+.badge{background:#0b1220;border-radius:999px;padding:6px 10px;font-size:13px}
+.comments{margin-top:10px;border-top:1px solid #334155;padding-top:10px;display:none}
+.comments.open{display:block}
+.cm{font-size:14px;padding:6px 0;border-bottom:1px solid #263244;word-break:break-word}
+.cm b{color:var(--acc)}
+.fab{position:fixed;right:18px;bottom:calc(18px + env(safe-area-inset-bottom));width:58px;height:58px;border-radius:50%;font-size:30px;background:var(--acc);box-shadow:0 6px 20px #0008;z-index:6}
+dialog{background:var(--card);color:var(--txt);border:0;border-radius:16px;width:min(94vw,500px);padding:18px}
+dialog::backdrop{background:#000a}
+dialog label{display:block;margin:10px 0 4px;font-size:14px;color:var(--muted)}
+.toast{position:fixed;left:50%;bottom:90px;transform:translateX(-50%);background:#111827;padding:10px 16px;border-radius:10px;opacity:0;transition:.3s;pointer-events:none;z-index:10}
+.toast.show{opacity:1}
+.empty{text-align:center;color:var(--muted);padding:40px 0}
+</style>
+</head>
+<body>
+<header><h1>🧪 TestShare</h1><button class="btn-ghost" id="nameBtn">👤</button></header>
+<main>
+  <div class="tools">
+    <input id="search" placeholder="Rechercher une app…" autocomplete="off">
+    <select id="sort"><option value="new">Récentes</option><option value="less">Moins testées</option><option value="top">Plus testées</option></select>
+  </div>
+  <div id="list"><div class="empty">Chargement…</div></div>
+</main>
+<button class="fab" id="addBtn" aria-label="Ajouter">+</button>
+
+<dialog id="addDlg">
+  <form id="addForm" method="dialog">
+    <h2 style="margin:0">Partager mon app</h2>
+    <label>Nom de l'app</label><input name="name" required minlength="2" maxlength="60">
+    <label>Lien de test (play.google.com ou groups.google.com)</label><input name="url" type="url" required placeholder="https://play.google.com/apps/testing/…">
+    <label>Description (optionnel)</label><textarea name="description" maxlength="300"></textarea>
+    <div class="row"><button type="button" class="btn-ghost" id="cancelAdd">Annuler</button><button class="btn-acc" id="submitAdd">Publier</button></div>
+  </form>
+</dialog>
+
+<div class="toast" id="toast"></div>
+
+<script>
+// Backend Supabase (clé publique, sans risque côté client)
+const SUPABASE_URL = "https://yzxbxwcdatofmyzcnqlc.supabase.co";
+const SUPABASE_ANON_KEY = "sb_publishable_p1b4wsd18v5HHHF9usC80Q_-sLZWr89";
+
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+const $ = s => document.querySelector(s);
+const state = { apps: [], comments: new Map(), open: new Set() };
+const URL_RE = /^https:\/\/(play\.google\.com|groups\.google\.com)\//i;
+
+const store = {
+  get(k, d) { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } },
+  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} }
+};
+let pseudo = store.get("pseudo", "");
+const clicked = new Set(store.get("clicked", []));
+
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const ago = d => { const s = (Date.now() - new Date(d)) / 1000; if (s < 60) return "à l'instant"; if (s < 3600) return `il y a ${Math.floor(s / 60)} min`; if (s < 86400) return `il y a ${Math.floor(s / 3600)} h`; return `il y a ${Math.floor(s / 86400)} j`; };
+let toastT;
+const toast = m => { const t = $("#toast"); t.textContent = m; t.classList.add("show"); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove("show"), 2500); };
+
+function askName() {
+  const n = prompt("Ton pseudo :", pseudo || "");
+  if (n !== null) { pseudo = n.trim().slice(0, 40); store.set("pseudo", pseudo); toast(pseudo ? `Salut ${pseudo} !` : "Pseudo effacé"); }
+}
+
+async function loadApps() {
+  const { data, error } = await sb.from("apps").select("*").order("created_at", { ascending: false }).limit(500);
+  if (error) { $("#list").innerHTML = `<div class="empty">Erreur : ${esc(error.message)}</div>`; return; }
+  state.apps = data; render();
+}
+
+async function loadComments(appId) {
+  const { data, error } = await sb.from("comments").select("*").eq("app_id", appId).order("created_at", { ascending: false }).limit(100);
+  if (!error) { state.comments.set(appId, data); render(); }
+}
+
+function sorted() {
+  const q = $("#search").value.trim().toLowerCase();
+  let a = state.apps.filter(x => !q || x.name.toLowerCase().includes(q) || (x.description || "").toLowerCase().includes(q));
+  const s = $("#sort").value;
+  if (s === "less") a = [...a].sort((x, y) => x.clicks - y.clicks);
+  else if (s === "top") a = [...a].sort((x, y) => y.clicks - x.clicks);
+  return a;
+}
+
+function render() {
+  const apps = sorted();
+  if (!apps.length) { $("#list").innerHTML = `<div class="empty">Aucune app. Partage la tienne avec ＋</div>`; return; }
+  $("#list").innerHTML = apps.map(a => {
+    const open = state.open.has(a.id);
+    const cms = state.comments.get(a.id);
+    return `<div class="card" data-id="${a.id}">
+      <h3>${esc(a.name)}</h3>
+      <div class="meta">par ${esc(a.author || "anonyme")} · ${ago(a.created_at)}</div>
+      ${a.description ? `<div class="desc">${esc(a.description)}</div>` : ""}
+      <div class="row">
+        <span class="badge">👆 ${a.clicks} testeur${a.clicks > 1 ? "s" : ""}</span>
+        ${clicked.has(a.id) ? `<span class="badge">✅ testé</span>` : ""}
+      </div>
+      <div class="row">
+        <button class="btn-acc" data-act="open">Tester l'app</button>
+        <button class="btn-ghost" data-act="cm">💬 Commentaires${cms ? ` (${cms.length})` : ""}</button>
+      </div>
+      <div class="comments ${open ? "open" : ""}">
+        <form data-act="send" class="row" style="flex-wrap:nowrap">
+          <input name="body" maxlength="500" placeholder="Ton avis, un bug…" required>
+          <button>➤</button>
+        </form>
+        ${cms ? (cms.length ? cms.map(c => `<div class="cm"><b>${esc(c.author || "anonyme")}</b> <span class="meta">${ago(c.created_at)}</span><br>${esc(c.body)}</div>`).join("") : `<div class="meta" style="padding-top:8px">Aucun commentaire.</div>`) : `<div class="meta" style="padding-top:8px">Chargement…</div>`}
+      </div>
+    </div>`;
+  }).join("");
+}
+
+$("#list").addEventListener("click", async e => {
+  const btn = e.target.closest("[data-act]"); if (!btn || btn.tagName === "FORM") return;
+  const id = Number(btn.closest(".card").dataset.id);
+  const app = state.apps.find(a => a.id === id); if (!app) return;
+  if (btn.dataset.act === "open") {
+    if (!URL_RE.test(app.url)) return toast("Lien invalide");
+    if (!clicked.has(id)) {
+      clicked.add(id); store.set("clicked", [...clicked]);
+      app.clicks++; render();
+      sb.rpc("increment_click", { app_id: id }).then(({ data }) => { if (typeof data === "number") { app.clicks = data; render(); } });
+    }
+    if (window.Android?.openExternal) window.Android.openExternal(app.url);
+    else window.open(app.url, "_blank", "noopener");
+  } else if (btn.dataset.act === "cm") {
+    if (state.open.has(id)) state.open.delete(id); else { state.open.add(id); if (!state.comments.has(id)) loadComments(id); }
+    render();
+  }
+});
+
+$("#list").addEventListener("submit", async e => {
+  e.preventDefault();
+  const f = e.target, id = Number(f.closest(".card").dataset.id);
+  const body = f.body.value.trim(); if (!body) return;
+  const b = f.querySelector("button"); b.disabled = true;
+  const { error } = await sb.from("comments").insert({ app_id: id, body, author: pseudo || null });
+  b.disabled = false;
+  if (error) return toast("Erreur : " + error.message);
+  f.reset(); loadComments(id);
+});
+
+$("#addBtn").onclick = () => { if (!pseudo) askName(); $("#addDlg").showModal(); };
+$("#cancelAdd").onclick = () => $("#addDlg").close();
+$("#nameBtn").onclick = askName;
+$("#search").oninput = render;
+$("#sort").onchange = render;
+
+$("#addForm").addEventListener("submit", async e => {
+  e.preventDefault();
+  const f = e.target;
+  const url = f.url.value.trim();
+  if (!URL_RE.test(url)) return toast("Le lien doit venir de play.google.com ou groups.google.com");
+  $("#submitAdd").disabled = true;
+  const { error } = await sb.from("apps").insert({ name: f.name.value.trim(), url, description: f.description.value.trim() || null, author: pseudo || null });
+  $("#submitAdd").disabled = false;
+  if (error) return toast(error.code === "23505" ? "Ce lien est déjà partagé" : "Erreur : " + error.message);
+  f.reset(); $("#addDlg").close(); toast("App publiée 🎉"); loadApps();
+});
+
+// Temps réel
+sb.channel("live")
+  .on("postgres_changes", { event: "*", schema: "public", table: "apps" }, p => {
+    const i = state.apps.findIndex(a => a.id === p.new?.id);
+    if (p.eventType === "INSERT" && i < 0) state.apps.unshift(p.new);
+    else if (p.eventType === "UPDATE" && i >= 0) state.apps[i] = p.new;
+    render();
+  })
+  .on("postgres_changes", { event: "INSERT", schema: "public", table: "comments" }, p => {
+    if (state.comments.has(p.new.app_id)) loadComments(p.new.app_id);
+  })
+  .subscribe();
+
+window.handleBack = () => {
+  const d = $("#addDlg"); if (d.open) { d.close(); return true; }
+  if (state.open.size) { state.open.clear(); render(); return true; }
+  return false;
+};
+
+loadApps();
+</script>
+</body>
+</html>
